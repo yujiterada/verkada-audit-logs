@@ -6,6 +6,9 @@ from typing import Optional, Dict, Any, Generator
 
 VERKADA_ENVIRONMENT_VARIABLE_API_KEY = "VERKADA_API_KEY"
 DEFAULT_BASE_URL = "https://api.au.verkada.com"
+DEFAULT_SESSION_TIMEOUT = 30
+WAIT_ON_RATE_LIMIT = True
+NGINX_429_RETRY_WAIT_TIME = 60
 
 load_dotenv()
 
