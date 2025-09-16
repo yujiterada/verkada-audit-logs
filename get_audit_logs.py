@@ -2,13 +2,15 @@ from dotenv import load_dotenv
 import logging
 import os
 import requests
+import time
 from typing import Optional, Dict, Any, Generator
 
 VERKADA_ENVIRONMENT_VARIABLE_API_KEY = "VERKADA_API_KEY"
 DEFAULT_BASE_URL = "https://api.au.verkada.com"
 DEFAULT_SESSION_TIMEOUT = 30
 WAIT_ON_RATE_LIMIT = True
-NGINX_429_RETRY_WAIT_TIME = 60
+NGINX_429_RETRY_WAIT_TIME = 10
+MAX_RETRIES = 3
 
 load_dotenv()
 
@@ -16,15 +18,61 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class VerkadaAuthenticationError(Exception):
+    """Exception for authentication errors"""
+    pass
+
+class VerkadaSession:
+    """Session class for handling HTTP requests with retries and error handling"""
+
+    def __init__(self, timeout=DEFAULT_SESSION_TIMEOUT):
+        self.session = requests.Session()
+        self.timeout = timeout
+        self.max_retries = MAX_RETRIES
+
+    def request(self, method, url, **kwargs):
+        retries = self.max_retries
+
+        while retries > 0:
+            try:
+                response = self.session.request(method=method, url=url, timeout=self.timeout, **kwargs)
+                print(response)
+                if response:
+                    response.close()
+                    reason = response.reason if response.reason else ''
+                    status = response.status_code
+            except requests.exceptions.RequestException as e:
+                print(e)
+                retries -= 1
+                time.sleep(1)
+
+            match status:
+                case status if 200 <= status < 300:
+                    return response
+                case 409:
+                    raise VerkadaAuthenticationError(f"Authentication error: Bad API key or token")
+                case 429:
+                    logger.warning(f"Rate limit hit, waiting {NGINX_429_RETRY_WAIT_TIME} seconds...")
+                    time.sleep(NGINX_429_RETRY_WAIT_TIME)
+                    retries -= 1
+                    response = self.session.request(method, url, **kwargs)
+                case status if 500 <= status:
+                    print((f'{{method}} {url} - {status} {reason}'))
+                    retries -= 1
+                case status if status != 429 and 400 <= status < 500:
+                    retries -= 1
+
 class VerkadaAPI():
     def __init__(self, api_key=None):
+        self.api_key = None
+        self.token = None
+        self.session = VerkadaSession()
+
         if not api_key and not os.environ.get(VERKADA_ENVIRONMENT_VARIABLE_API_KEY):
             print("API key not found")
             return
-
         self.api_key = api_key or os.environ.get(VERKADA_ENVIRONMENT_VARIABLE_API_KEY)
         res = self.postLoginApiKeyViewV2()
-        print(res.json())
         self.token = res.json()['token']
 
     def postLoginApiKeyViewV2(self):
@@ -36,12 +84,11 @@ class VerkadaAPI():
         """
         resource = f'/token'
         url = f"{DEFAULT_BASE_URL}{resource}"
-        print(url)
         headers = {
             "x-api-key": f"{self.api_key}",
             "Content-Type": "application/json",
         }
-        response = requests.post(url, headers=headers)
+        response = self.session.request('POST', url, headers=headers)
         return response
     
     def getAuditLogsViewV1(self,
@@ -50,12 +97,12 @@ class VerkadaAPI():
                         page_size: Optional[int] = 100) -> Generator[Dict[str, Any], None, None]:
         """
         Generator function to retrieve all audit logs across multiple pages.
-        
+
         Args:
             start_time (int, optional): Start of time range as Unix timestamp in seconds.
             end_time (int, optional): End of time range as Unix timestamp in seconds.
             page_size (int, optional): Number of items per page (1-200, default: 200).
-        
+
         Yields:
             Individual audit log entries
         """
@@ -65,31 +112,8 @@ class VerkadaAPI():
             "x-verkada-auth": f"{self.token}",
             "Content-Type": "application/json"
         }
-        response = requests.get(url, headers=headers)
+        response = self.session.request('GET', url, headers=headers)
         return response
-        
-        # while True:
-        #     response = self.get_audit_logs(
-        #         start_time=start_time,
-        #         end_time=end_time,
-        #         page_token=page_token,
-        #         page_size=page_size
-        #     )
-            
-        #     if not response:
-        #         logger.error("Failed to retrieve audit logs page")
-        #         break
-            
-        #     # Yield individual audit log entries
-        #     # Note: Adjust based on actual response structure
-        #     audit_logs = response.get('audit_logs', [])
-        #     for log in audit_logs:
-        #         yield log
-            
-        #     # Check if there are more pages
-        #     page_token = response.get('next_page_token')
-        #     if not page_token:
-        #         break
 
 if __name__ == "__main__":
     # Create an instance of VerkadaAPI to test
