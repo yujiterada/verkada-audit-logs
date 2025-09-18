@@ -1,4 +1,5 @@
 from dotenv import load_dotenv
+import json
 import logging
 import os
 import requests
@@ -9,31 +10,49 @@ from requests.exceptions import ConnectionError, Timeout, RequestException
 VERKADA_ENVIRONMENT_VARIABLE_API_KEY = "VERKADA_API_KEY"
 DEFAULT_BASE_URL = "https://api.au.verkada.com"
 DEFAULT_SESSION_TIMEOUT = 30
-DEFAULT_PAGE_SIZE = 1
-WAIT_ON_RATE_LIMIT = True
+DEFAULT_PAGE_SIZE = 100
+DEFAULT_TOKEN_EXPIRATION_TIME = 25  # 25 minutes
 RETRY_WAIT_TIME = 10
 MAX_RETRIES = 3
+INTERESTED_EVENTS = ['Archive Action Taken', 'Video History Streamed', 'Live Stream Started']
 
 load_dotenv()
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 def clean_params(params):
     """Remove keys with None values"""
     return {k: v for k, v in params.items() if v is not None}
+
 
 class VerkadaAuthenticationError(Exception):
     """Exception for authentication errors"""
     pass
 
+
 class VerkadaTokenExpiredError(Exception):
     """Exception for token expired errors"""
     pass
 
+
 class VerkadaConnectionError(Exception):
     """Exception for connection errors"""
     pass
+
+# Create a mock response object with the aggregated data
+class MockResponse:
+    def __init__(self, original_response, new_data):
+        self._original = original_response
+        self._data = new_data
+        
+    def json(self):
+        return self._data
+        
+    # Delegate other attributes to original response
+    def __getattr__(self, name):
+        return getattr(self._original, name)
 
 class VerkadaSession:
     """Session class for handling HTTP requests with retries and error handling"""
@@ -49,11 +68,13 @@ class VerkadaSession:
 
         while retries > 0:
             try:
-                logger.info(f"Making {method} request to {url} (retries left: {retries})")
-                response = self.session.request(method=method, url=url, timeout=self.timeout, **kwargs)
+                logger.info(
+                    f"Making {method} request to {url} (retries left: {retries})")
+                response = self.session.request(
+                    method=method, url=url, timeout=self.timeout, **kwargs)
                 status = response.status_code
                 reason = response.reason if response.reason else ''
-                
+
                 # Handle successful response
                 if 200 <= status < 300:
                     logger.info(f"Request successful: {status}")
@@ -61,35 +82,42 @@ class VerkadaSession:
                 if status == 401:
                     raise VerkadaTokenExpiredError(f"Token expired")
                 elif status == 409:
-                    raise VerkadaAuthenticationError(f"Authentication error: Bad API key or token")
+                    raise VerkadaAuthenticationError(
+                        f"Authentication error: Bad API key or token")
                 elif status == 429:
-                    logger.warning(f"Rate limit hit, waiting {RETRY_WAIT_TIME} seconds...")
+                    logger.warning(
+                        f"Rate limit hit, waiting {RETRY_WAIT_TIME} seconds...")
                     time.sleep(RETRY_WAIT_TIME)
                     retries -= 1
                     continue
                 elif 500 <= status:
-                    logger.warning(f"Server error {status} {reason} for {method} {url}")
+                    logger.warning(
+                        f"Server error {status} {reason} for {method} {url}")
                     retries -= 1
                     if retries > 0:
-                        wait_time = (self.max_retries - retries) * RETRY_WAIT_TIME  # Exponential backoff
+                        wait_time = (self.max_retries - retries) * \
+                            RETRY_WAIT_TIME  # Exponential backoff
                         logger.info(f"Retrying in {wait_time} seconds...")
                         time.sleep(wait_time)
                     continue
                 elif 400 <= status < 500:
-                    logger.warning(f"Client error {status} {reason} for {method} {url}")
+                    logger.warning(
+                        f"Client error {status} {reason} for {method} {url}")
                     retries -= 1
                     if retries > 0:
-                        wait_time = (self.max_retries - retries) * RETRY_WAIT_TIME
+                        wait_time = (self.max_retries - retries) * \
+                            RETRY_WAIT_TIME
                         logger.info(f"Retrying in {wait_time} seconds...")
                         time.sleep(wait_time)
                     continue
-                    
+
             except (ConnectionError, Timeout) as e:
                 last_exception = e
                 logger.warning(f"Connection error: {e}")
                 retries -= 1
                 if retries > 0:
-                    wait_time = (self.max_retries - retries) * RETRY_WAIT_TIME  # Exponential backoff
+                    wait_time = (self.max_retries - retries) * \
+                        RETRY_WAIT_TIME  # Exponential backoff
                     logger.info(f"Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 continue
@@ -102,6 +130,9 @@ class VerkadaSession:
                     logger.info(f"Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 continue
+            except VerkadaTokenExpiredError as e:
+                logger.error(f"Token expired: {e}")
+                logger.info("Refreshing token")
             except Exception as e:
                 logger.error(f"Unexpected error: {e}")
                 raise e
@@ -109,23 +140,56 @@ class VerkadaSession:
         # If we get here, all retries failed
         if last_exception:
             if isinstance(last_exception, (ConnectionError, Timeout)):
-                raise VerkadaConnectionError(f"Failed to connect after {self.max_retries} retries: {last_exception}")
+                raise VerkadaConnectionError(
+                    f"Failed to connect after {self.max_retries} retries: {last_exception}")
             else:
                 raise last_exception
         else:
-            raise VerkadaConnectionError(f"Request failed after {self.max_retries} retries")
+            raise VerkadaConnectionError(
+                f"Request failed after {self.max_retries} retries")
+
+    def request_pages(self, method, url, **kwargs):
+        """
+        Request pages from a Verkada API endpoint
+        """
+        response = self.request(method, url, **kwargs)
+        return response
+
+    def request_all_pages(self, method, url, keys, **kwargs):
+        """
+        Request all pages from a Verkada API endpoint
+        """
+        data = {}
+        next_page_token = 1
+        for k in keys:
+            data[k] = []
+        while next_page_token:
+            logging.info(f"Requesting page {next_page_token}")
+            kwargs['params']['page_token'] = next_page_token
+            response = self.request(method, url, **kwargs)
+            next_page_token = response.json()['next_page_token']
+            for k in keys:
+                data[k].extend(response.json()[k])
+        for k in keys:
+            response.json()[k] = data[k]
+        return MockResponse(response, data)
+
 
 class VerkadaAPI():
     def __init__(self, api_key=None):
         self.api_key = None
-        self.token = self._readToken()
+        self.token = None
         self.session = VerkadaSession()
+        self.timestamp = None
 
         if not api_key and not os.environ.get(VERKADA_ENVIRONMENT_VARIABLE_API_KEY):
             logger.error("API key not found")
             return
-        self.api_key = api_key or os.environ.get(VERKADA_ENVIRONMENT_VARIABLE_API_KEY)
+        self.api_key = api_key or os.environ.get(
+            VERKADA_ENVIRONMENT_VARIABLE_API_KEY)
         
+
+        self._readToken()
         try:
             if not self.token:
                 token = self._refreshToken()
@@ -146,19 +210,24 @@ class VerkadaAPI():
     def _refreshToken(self):
         res = self.postLoginApiKeyViewV2()
         self.token = res.json()['token']
-        with open('token.txt', 'w') as f:
-            f.write(self.token)
-        logger.info("Token refreshed and saved to token.txt")
-        return self.token
+        self.timestamp = int(time.time())
+        with open('token.json', 'w') as f:
+            f.write(json.dumps({'token': self.token, 'timestamp': self.timestamp}))
+        logger.info("Token refreshed and saved to token.json")
 
     def _readToken(self):
-        logger.info("Reading token from token.txt")
-        if not os.path.exists('token.txt'):
+        logger.info("Reading token from token.json")
+        if not os.path.exists('token.json'):
             logger.info("Token file not found, creating new token")
-            return None
-        with open('token.txt', 'r') as f:
-            self.token = f.read()
-        return self.token
+            self._refreshToken()
+        else:
+            with open('token.json', 'r') as f:
+                token_data = json.load(f)
+                self.token = token_data.get('token')
+                self.timestamp = token_data.get('timestamp')
+            if self.timestamp < int(time.time()) - DEFAULT_TOKEN_EXPIRATION_TIME * 60:
+                logger.info("Token expired, refreshing token")
+                self._refreshToken()
 
     def postLoginApiKeyViewV2(self):
         """
@@ -175,11 +244,11 @@ class VerkadaAPI():
         }
         response = self.session.request('POST', url, headers=headers)
         return response
-    
+
     def getAuditLogsViewV1(self,
-                        start_time: Optional[int] = None,
-                        end_time: Optional[int] = None,
-                        page_size: Optional[int] = DEFAULT_PAGE_SIZE) -> Generator[Dict[str, Any], None, None]:
+                           start_time: Optional[int] = None,
+                           end_time: Optional[int] = None,
+                           page_size: Optional[int] = DEFAULT_PAGE_SIZE) -> Generator[Dict[str, Any], None, None]:
         """
         Generator function to retrieve all audit logs across multiple pages.
 
@@ -191,7 +260,8 @@ class VerkadaAPI():
         Yields:
             Individual audit log entries
         """
-        query_params = {'start_time': start_time, 'end_time': end_time, 'page_size': page_size}
+        query_params = {'start_time': start_time,
+                        'end_time': end_time, 'page_size': page_size}
         clean_query_params = clean_params(query_params)
         resource = f'/core/v1/audit_log'
         url = f"{DEFAULT_BASE_URL}{resource}"
@@ -199,11 +269,16 @@ class VerkadaAPI():
             "x-verkada-auth": f"{self.token}",
             "Content-Type": "application/json"
         }
-        response = self.session.request('GET', url, headers=headers, params=clean_query_params)
+        response = self.session.request_all_pages(
+            'GET', url, ['audit_logs'], headers=headers, params=clean_query_params)
         return response
 
+
 if __name__ == "__main__":
-        # Create an instance of VerkadaAPI to test
+    
     client = VerkadaAPI()
     res = client.getAuditLogsViewV1()
-    print(res.json())
+    audit_logs = res.json()['audit_logs']
+    for audit_log in audit_logs:
+        if audit_log['event_name'] in INTERESTED_EVENTS:
+            print(audit_log)
