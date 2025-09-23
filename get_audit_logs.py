@@ -4,6 +4,7 @@ import logging
 import os
 import requests
 import time
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Generator
 from requests.exceptions import ConnectionError, Timeout, RequestException
 
@@ -15,6 +16,7 @@ DEFAULT_TOKEN_EXPIRATION_TIME = 25  # 25 minutes
 RETRY_WAIT_TIME = 10
 MAX_RETRIES = 3
 INTERESTED_EVENTS = ['Archive Action Taken', 'Video History Streamed', 'Live Stream Started']
+CRON_INTERVAL_MINUTES = 15  # Interval in minutes for cron job execution
 
 load_dotenv()
 # Set up logging
@@ -75,7 +77,7 @@ class VerkadaSession:
                 status = response.status_code
                 reason = response.reason if response.reason else ''
 
-                # Handle successful response
+                # Handle response
                 if 200 <= status < 300:
                     logger.info(f"Request successful: {status}")
                     return response
@@ -160,16 +162,19 @@ class VerkadaSession:
         Request all pages from a Verkada API endpoint
         """
         data = {}
-        next_page_token = 1
+        number_of_pages = 0
+        next_page_token = None
         for k in keys:
             data[k] = []
-        while next_page_token:
+        while next_page_token or number_of_pages == 0:
+            number_of_pages += 1
             logging.info(f"Requesting page {next_page_token}")
             kwargs['params']['page_token'] = next_page_token
             response = self.request(method, url, **kwargs)
             next_page_token = response.json()['next_page_token']
             for k in keys:
                 data[k].extend(response.json()[k])
+        logger.info(f"Number of pages retrieved: {number_of_pages}")
         for k in keys:
             response.json()[k] = data[k]
         return MockResponse(response, data)
@@ -273,12 +278,70 @@ class VerkadaAPI():
             'GET', url, ['audit_logs'], headers=headers, params=clean_query_params)
         return response
 
+    def getNotificationsViewV1(self, 
+                        start_time: Optional[int] = None,
+                        end_time: Optional[int] = None,
+                        include_image_url: Optional[bool] = False,
+                        page_size: Optional[int] = DEFAULT_PAGE_SIZE,
+                        notification_type: Optional[str] = None) -> Generator[Dict[str, Any], None, None]:
+        """
+        Convenience method to get all alerts of a specific type.
+        
+        Args:
+            alert_type (str): Type of alert to retrieve (e.g., 'motion', 'person_of_interest')
+            start_time (int, optional): Start of time range as Unix timestamp in seconds.
+            end_time (int, optional): End of time range as Unix timestamp in seconds.
+            include_image_url (bool, optional): Flag to include image URLs.
+        
+        Returns:
+            List of all alerts of the specified type
+        """
+        query_params = {
+            'start_time': start_time,
+            'end_time': end_time,
+            'include_image_url': include_image_url,
+            'page_size': page_size,
+            'notification_type': notification_type
+        }
+        clean_query_params = clean_params(query_params)
+        resource = f'/cameras/v1/alerts'
+        url = f"{DEFAULT_BASE_URL}{resource}"
+        headers = {
+            "x-verkada-auth": f"{self.token}",
+            "Content-Type": "application/json"
+        }
+        response = self.session.request_all_pages(
+            'GET', url, ['notifications'], headers=headers, params=clean_query_params)
+        return response
+
 
 if __name__ == "__main__":
-    
+    # Get current time
+    current_time = datetime.now()
+    logger.info(f"Started at {current_time} ({current_time.timestamp()})")
+
+    # Calculate end_time as the most recent 15-minute interval boundary
+    # Round down to the nearest 15-minute mark
+    minutes_past_interval = current_time.minute % CRON_INTERVAL_MINUTES
+    end_time_dt = current_time.replace(second=0, microsecond=0) - timedelta(minutes=minutes_past_interval)
+    end_time = int(end_time_dt.timestamp())
+
+    # Calculate start_time as 15 minutes before the end_time
+    start_time_dt = end_time_dt - timedelta(minutes=CRON_INTERVAL_MINUTES)
+    start_time = int(start_time_dt.timestamp())
+
+    logger.info(f"Fetching audit logs from {datetime.fromtimestamp(start_time)} ({start_time}) to {datetime.fromtimestamp(end_time)} ({end_time})")
+
     client = VerkadaAPI()
-    res = client.getAuditLogsViewV1()
+    # res = client.getAuditLogsViewV1()
+    res = client.getAuditLogsViewV1(start_time=start_time, end_time=end_time)
     audit_logs = res.json()['audit_logs']
     for audit_log in audit_logs:
         if audit_log['event_name'] in INTERESTED_EVENTS:
-            print(audit_log)
+            print(json.dumps(audit_log, indent=4))
+
+    # res = client.getNotificationsViewV1()
+    res = client.getNotificationsViewV1(start_time=start_time, end_time=end_time)
+    notifications = res.json()['notifications']
+    for notification in notifications:
+        print(json.dumps(notification, indent=4))
