@@ -1,3 +1,4 @@
+import argparse
 from dotenv import load_dotenv
 import json
 import logging
@@ -316,19 +317,35 @@ class VerkadaAPI():
 
 
 if __name__ == "__main__":
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Fetch Verkada audit logs')
+    parser.add_argument('--start', type=int, help='Start time as Unix timestamp (required if --end is specified)')
+    parser.add_argument('--end', type=int, help='End time as Unix timestamp (required if --start is specified)')
+    args = parser.parse_args()
+
+    # Validate that both start and end are provided together or neither
+    if (args.start is None) != (args.end is None):
+        parser.error('Both --start and --end must be specified together')
+
     # Get current time
     current_time = datetime.now()
     logger.info(f"Started at {current_time} ({current_time.timestamp()})")
 
-    # Calculate end_time as the most recent 15-minute interval boundary
-    # Round down to the nearest 15-minute mark
-    minutes_past_interval = current_time.minute % CRON_INTERVAL_MINUTES
-    end_time_dt = current_time.replace(second=0, microsecond=0) - timedelta(minutes=minutes_past_interval)
-    end_time = int(end_time_dt.timestamp())
+    if args.start is not None and args.end is not None:
+        # Use provided start and end times
+        start_time = args.start
+        end_time = args.end
+        logger.info(f"Using provided time range")
+    else:
+        # Calculate end_time as the most recent 15-minute interval boundary
+        # Round down to the nearest 15-minute mark
+        minutes_past_interval = current_time.minute % CRON_INTERVAL_MINUTES
+        end_time_dt = current_time.replace(second=0, microsecond=0) - timedelta(minutes=minutes_past_interval)
+        end_time = int(end_time_dt.timestamp())
 
-    # Calculate start_time as 15 minutes before the end_time
-    start_time_dt = end_time_dt - timedelta(minutes=CRON_INTERVAL_MINUTES)
-    start_time = int(start_time_dt.timestamp())
+        # Calculate start_time as 15 minutes before the end_time
+        start_time_dt = end_time_dt - timedelta(minutes=CRON_INTERVAL_MINUTES)
+        start_time = int(start_time_dt.timestamp())
 
     logger.info(f"Fetching audit logs from {datetime.fromtimestamp(start_time)} ({start_time}) to {datetime.fromtimestamp(end_time)} ({end_time})")
 
