@@ -13,6 +13,7 @@ This tool fetches audit logs and camera notifications from Verkada's API, focusi
 - **Error Handling**: Comprehensive retry logic for network issues and rate limiting
 - **Filtered Events**: Focuses on specific event types (Archive Action Taken, Video History Streamed, Live Stream Started)
 - **Scheduled Execution**: Designed to run every 15 minutes via cron
+- **Custom Time Range**: Supports `--start` and `--end` arguments for fetching logs from specific time periods
 
 ## Requirements
 
@@ -46,9 +47,26 @@ VERKADA_API_KEY=your_api_key_here
 
 ### Command Line
 
+Run with automatic 15-minute interval (default behavior for cron):
+
 ```bash
 python get_audit_logs.py
 ```
+
+Run with custom time range using Unix timestamps:
+
+```bash
+python get_audit_logs.py --start 1706900000 --end 1706901000
+```
+
+#### Command-Line Arguments
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `--start` | int | Start time as Unix timestamp (required if `--end` is specified) |
+| `--end` | int | End time as Unix timestamp (required if `--start` is specified) |
+
+**Note**: Both `--start` and `--end` must be specified together, or neither. If not provided, the script automatically calculates the most recent 15-minute interval.
 
 ### Programmatic Usage
 
